@@ -1,5 +1,5 @@
 program format;
-{$M 16384,0,8192}
+{$M 16384,0,16384}
 uses dos,crt;
 { replaces DOS format: expects DOS format to be called LFORMAT.EXE or }
 { LFORMAT.COM, and to be located either in C:\DOS or C:\.  It doesn't }
@@ -17,7 +17,7 @@ uses dos,crt;
 { been checked, the FATs and root directory are zeroed.               }
 
 type
-  buffarray = array [1..512] of byte;
+  buffarray = array [1..512*18] of byte;
   buffptr = ^buffarray;
 
 var
@@ -35,11 +35,11 @@ var
   tracks     : word;
   sys        : boolean;
   Buffer     : buffptr;
+  temp       : char;
 
 procedure find_DOS_format (var path:string);
 begin
-
-  path := 'C:\DOS\LFORMAT.COM';
+  path := Fexpand(Fsearch ('LFORMAT.COM','C:\;C:\DOS'));
 end;
 
 procedure upper (var low : string);
@@ -66,33 +66,6 @@ begin
   intr($13,Regs);
 end;
 
-function CheckSector (drive:byte;head,track,sector:word):boolean;
-var
-  Regs : Registers;
-  Count : integer;
-  Ok : boolean;
-
-begin
-  Ok := false;
-  Count := 0;
-  while not ok and (Count < 3) do begin
-    Regs.AH := $02; { Read Disk Sectors }
-    Regs.AL := $01; { Number of sectors to transfer }
-    Regs.ES := seg(Buffer^);   { ES:BX is pointer to disk buffer }
-    Regs.BX := ofs(Buffer^);
-    Regs.CH := track; { Track number }
-    Regs.CL := sector; { Sector number }
-    Regs.DH := head; { Head number }
-    Regs.DL := drive; { Drive number }
-    intr($13,Regs);
-    if not ((Regs.Flags and FCarry)=FCarry) then
-      Ok := true
-    else
-      resetDisk(drive);
-    count := count + 1;
-  end;
-  CheckSector := Ok;
-end;
 
 function CheckBootSector(drive:byte;var BytesPerSector, SectorsPerFAT,
                                         SectorsPerTrack, Heads,
@@ -135,33 +108,80 @@ begin
 end;
 
 procedure format_track(drive:byte;head,track:word);
+var
+  Regs : Registers;
+  Count : integer;
+  Ok : boolean;
+
 begin
-  writeln ('Formatting drive ',drive,', head ',head,', track ',track);
+  For count := 0 to (spt-1) do begin
+    buffer^[count*4+1]:=track;
+    buffer^[count*4+2]:=head;
+    buffer^[count*4+3]:=count;
+    buffer^[count*4+4]:=2;
+  end;
+  ok := false;
+  count := 0;
+  while not ok and (Count < 3) do begin
+    Regs.AH := $05;            { Format Disk Track }
+    Regs.ES := seg (Buffer^);  { ES:BX is pointer to track address list }
+    Regs.BX := ofs (Buffer^);
+    Regs.CH := track;
+    Regs.DH := head;
+    Regs.DL := drive;
+    Intr ($13,Regs);
+    if not ((Regs.Flags and FCarry)=FCarry) then
+      Ok := true
+    else
+      resetDisk(drive);
+    count := count + 1;
+  end;
 end;
 
 procedure format_disk(drive:byte;bps,spf,spt,heads,tracks:word);
 var
+  Regs : Registers;
+  Count : integer;
+  Ok : boolean;
   head,
   track,
   sector : word;
   sp : word;
 begin
   sp := 0;
-  for track := 0 to (tracks-1) do
-    for head := 0 to (heads-1) do
-      for sector := 1 to spt do
-        if not checksector(drive,head,track,sector) then
-          format_track(drive,head,track)
+  Regs.ES := seg(Buffer^);   { ES:BX is pointer to disk buffer }
+  Regs.BX := ofs(Buffer^);
+  Regs.DL := drive; { Drive number }
+  for track := 1 to (tracks-1) do begin
+    Regs.CH := track; { Track number }
+    for head := 0 to (heads-1) do begin
+      Regs.DH := head; { Head number }
+      Ok := false;
+      Count := 0;
+      while not ok and (Count < 3) do begin
+        Regs.AH := $04; { Verify Disk Sectors }
+        Regs.AL := spt; { Number of sectors to transfer }
+        Regs.CL := $01; { Sector number }
+        intr($13,Regs);
+        if not ((Regs.Flags and FCarry)=FCarry) then
+          Ok := true
         else
+          resetDisk(drive);
+        count := count + 1;
+      end;
+      if not ok then
+        format_track(drive,head,track);
 {          writeln ('Confirming drive ',drive,
                    ', head ',head,
                    ', track ',track,
                    ', sector ',sector);
 }
-           begin inc(sp);
-           writeln(sp/(heads*tracks*spt)*100:5:0);
-           gotoxy(1,wherey-1);
-           end;
+      inc(sp);
+      write(sp/(heads*tracks)*100:5:0,'% t=',track:3,' h=',head:3);
+      if not ok then writeln (' !') else writeln ('  ');
+      gotoxy(1,wherey-1);
+    end;
+  end;
 end;
 
 begin
@@ -184,9 +204,13 @@ begin
     Parameters := Copy(Parameters,1,Length(Parameters)-1);
   ResetDisk(drive);
   new (Buffer);
+  Writeln ('About to FORMAT the disk in Drive ',chr(drive+ord('A')));
+  Write ('Press return to continue or Ctrl-C to abort');
+  Read(temp);
   BootOk := CheckBootSector(drive,bps,spf,spt,heads,tracks);
   If not BootOk then exec (DOS_format,Parameters)
   else format_disk(drive,bps,spf,spt,heads,tracks);
+  writeln ('Format complete   ');
   dispose (Buffer);
   if sys = true then begin
 {    exec (DOS_sys,chr(drive+ord('A'))+':');
